@@ -632,7 +632,7 @@ class FigureExport(object):
         # Since unicode can't be wrapped by rstring
         figure_json_string = figure_json_string.decode('utf8')
         self.figure_json = self.version_transform_json(
-            json.loads(figure_json_string))
+            self._fix_figure_json(json.loads(figure_json_string)))
 
         n = datetime.now()
         # time-stamp name by default: Figure_2013-10-29_22-43-53.pdf
@@ -644,6 +644,18 @@ class FigureExport(object):
         # get Figure width & height...
         self.page_width = self.figure_json['paper_width']
         self.page_height = self.figure_json['paper_height']
+
+    def _fix_figure_json(self, figure_json):
+        """Ensure that the figure JSON is proper.
+        """
+        # In some cases, dx and dy end up missing or set to null.
+        # See issue #257 (missing) and #292 (null value).
+        for panel in figure_json['panels']:
+            for key in ['dx', 'dy']:
+                offset = panel.get(key)
+                if offset is None:
+                    panel[key] = DEFAULT_OFFSET
+        return figure_json
 
     def version_transform_json(self, figure_json):
 
@@ -884,8 +896,8 @@ class FigureExport(object):
         zoom = float(panel['zoom'])
         frame_w = panel['width']
         frame_h = panel['height']
-        dx = panel.get('dx', DEFAULT_OFFSET)
-        dy = panel.get('dy', DEFAULT_OFFSET)
+        dx = panel['dx']
+        dy = panel['dy']
         orig_w = panel['orig_width']
         orig_h = panel['orig_height']
 
@@ -1118,7 +1130,16 @@ class FigureExport(object):
             ly = y + height - spacer
             align = "right"
 
-        pixels_length = sb['length'] / panel['pixel_size_x']
+        pixel_size_x = panel['pixel_size_x']
+
+        # If we previously calculated the zoom scale for big image rendering
+        # Use this again here to scale the pixel size
+        if 'zoom_level_scale' in panel:
+            scale = panel['zoom_level_scale']
+            pixel_size_x = pixel_size_x / scale
+
+        pixels_length = sb['length'] / pixel_size_x
+
         scale_to_canvas = panel['width'] / float(region_width)
         canvas_length = pixels_length * scale_to_canvas
 
@@ -1155,16 +1176,8 @@ class FigureExport(object):
         max_w, max_h = self.conn.getMaxPlaneSize()
         return image.getSizeX() * image.getSizeY() > max_w * max_h
 
-    def render_big_image_region(self, image, z, t, region, max_width):
-        """
-        Render region of a big image at an appropriate zoom level
-        so width < max_width
-        """
-
-        size_x = image.getSizeX()
-        size_y = image.getSizeY()
-        x = region['x']
-        y = region['y']
+    def get_zoom_level_scale(self, image, region, max_width):
+        """Calculate the scale and zoom level we want to use for big image."""
         width = region['width']
         height = region['height']
 
@@ -1188,6 +1201,25 @@ class FigureExport(object):
         # We need to use final rendered jpeg coordinates
         # Convert from original image coordinates by scaling
         scale = zm_levels[zm]
+        return scale, level
+
+    def render_big_image_region(self, image, panel, z, t, region, max_width):
+        """
+        Render region of a big image at an appropriate zoom level
+        so width < max_width
+        """
+        scale, level = self.get_zoom_level_scale(image, region, max_width)
+        # cache the 'zoom_level_scale', in the panel dict.
+        # since we need it for scalebar, and don't want to calculate again
+        # since rendering engine will be closed by then
+        panel['zoom_level_scale'] = scale
+
+        width = region['width']
+        height = region['height']
+        x = region['x']
+        y = region['y']
+        size_x = image.getSizeX()
+        size_y = image.getSizeY()
         x = int(x * scale)
         y = int(y * scale)
         width = int(width * scale)
@@ -1256,15 +1288,15 @@ class FigureExport(object):
                                'height': vp_h + extra_h}
             max_width = max_width * (viewport_region['width'] / vp_w)
 
-        pil_img = self.render_big_image_region(image, z, t, viewport_region,
-                                               max_width)
+        pil_img = self.render_big_image_region(image, panel, z, t,
+                                               viewport_region, max_width)
 
         # Optional rotation
         if rotation != 0 and pil_img is not None:
             w, h = pil_img.size
             # How much smaller is the scaled image compared to viewport?
             # This will be the same 'scale' used in render_big_image_region()
-            scale = float(w) / viewport_region['width']
+            scale = panel['zoom_level_scale']
             # The size we want to crop to
             crop_target_w = scale * vp_w
             crop_target_h = scale * vp_h
@@ -1319,8 +1351,8 @@ class FigureExport(object):
         # Need to crop around centre before rotating...
         cx = size_x/2
         cy = size_y/2
-        dx = panel.get('dx', DEFAULT_OFFSET)
-        dy = panel.get('dy', DEFAULT_OFFSET)
+        dx = panel['dx']
+        dy = panel['dy']
 
         cx += dx
         cy += dy
