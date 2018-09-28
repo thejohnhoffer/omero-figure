@@ -1,6 +1,5 @@
 ```
 grunt demo
-vim demo/index.html '+:source test.vim | wq!'
 rm -rf docs
 cp -R demo docs
 ```
